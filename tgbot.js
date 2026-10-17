@@ -477,14 +477,17 @@ async function handle(upd, env) {
 
   const answer = r.json?.choices?.[0]?.message?.content;
   if (r.ok && answer) {
-    st.msgs.push({ role: "assistant", content: String(answer).slice(0, MAX_MSG) });
-    await putState(env, chatId, st);
+    // Jawab aane tak (10-110s) tumne /voice, /speed, /prompt jaisi settings badal di ho sakti hain.
+    // Purana `st` wapas save karne se wo settings (jaise voice on) wapas off ho jati thi.
+    // Isliye taaza state dobara padho aur usme sirf is baatcheet ke 2 messages jodo.
+    const cur = await getState(env, chatId);
+    cur.msgs.push({ role: "user", content: text.slice(0, MAX_MSG) }, { role: "assistant", content: String(answer).slice(0, MAX_MSG) });
+    await putState(env, chatId, cur);
     await send(env, chatId, answer, m.message_id);
-    if (st.voice) await speak(env, chatId, answer, null, st);
+    if (cur.voice) await speak(env, chatId, answer, null, cur);
     return;
   }
-  st.msgs.pop(); // error wala sawaal history me mat rakho
-  await putState(env, chatId, st);
+  // error aaya: kuch save nahi karna (sawaal bhi history me nahi jata, settings bhi nahi chhedi jati)
   if (r.status === 0 && /timeout/.test(r.text)) return send(env, chatId, "⏱️ 110 second tak jawab nahi aaya. Thodi der baad dobara bhejo.");
   const why = r.json?.error?.message || r.text.slice(0, 300);
   return send(env, chatId, "⚠️ " + (r.status || "error") + ": " + why + (r.status === 429 ? "\n(Thodi der baad dobara bhejo)" : ""));
