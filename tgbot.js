@@ -10,6 +10,7 @@
 //   ALLOWED_IDS     (Text)    tumhara Telegram id (comma se kai: 123,456). KHALI = sab use kar sakte hain!
 //   DEFAULT_MODEL   (Text, optional)  default "jaatvenice"
 //   EDGE_VOICE      (Text, optional)  default "hi-IN-SwaraNeural"  (ladka: hi-IN-MadhurNeural)
+//   TTS_URL / TTS_KEY (optional) Render wale bot.py ka link + key. Edge TTS Cloudflare IP se block ho to ye lagao (awaaz Render banata hai)
 //   EDGE_VER        (Text, optional)  Edge ka version number, TTS band ho jaye to naya daalo (default 143.0.3650.75)
 // Optional bindings:
 //   API   = Service binding -> jaat-api worker (workers.dev se worker-to-worker fetch na chale to ye lagao)
@@ -272,6 +273,18 @@ async function sendAudioFile(env, chatId, bytes, replyTo, asVoice) {
     .then((r) => r.json()).catch((e) => ({ ok: false, description: String(e) }));
 }
 
+// Cloudflare ka IP Edge TTS par block hota hai, isliye awaaz Render wale bot.py se banwate hain.
+// Worker variables: TTS_URL = https://<tumhara-render-app>.onrender.com   TTS_KEY = wahi jo Render me hai
+async function proxyTts(env, text, voice, rate, pitch, vol) {
+  const r = await fetch(env.TTS_URL.replace(/\/$/, "") + "/tts?key=" + encodeURIComponent(env.TTS_KEY || ""), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text, voice, rate, pitch, vol }),
+    signal: AbortSignal.timeout(60000), // Render free sota ho to pehli baar 30-50s lag sakte hain
+  });
+  if (!r.ok) throw new Error("TTS relay " + r.status + " " + (await r.text()).slice(0, 80));
+  return new Uint8Array(await r.arrayBuffer());
+}
+
 async function speak(env, chatId, answer, replyTo, st) {
   const clean = ttsClean(answer);
   if (!clean) return;
@@ -281,8 +294,13 @@ async function speak(env, chatId, answer, replyTo, st) {
   const iv = setInterval(act, 4500);
   try {
     let audio, asVoice = true;
-    try { audio = await edgeTts(env, clean, voice, "ogg-24khz-16bit-mono-opus", st.rate || 0, st.pitch || 0, st.vol || 0); }
-    catch { asVoice = false; audio = await edgeTts(env, clean, voice, "audio-24khz-48kbitrate-mono-mp3", st.rate || 0, st.pitch || 0, st.vol || 0); }
+    if (env.TTS_URL) {
+      audio = await proxyTts(env, clean, voice, st.rate || 0, st.pitch || 0, st.vol || 0);
+      asVoice = false; // relay mp3 deta hai, sendAudio se jayega
+    } else {
+      try { audio = await edgeTts(env, clean, voice, "ogg-24khz-16bit-mono-opus", st.rate || 0, st.pitch || 0, st.vol || 0); }
+      catch { asVoice = false; audio = await edgeTts(env, clean, voice, "audio-24khz-48kbitrate-mono-mp3", st.rate || 0, st.pitch || 0, st.vol || 0); }
+    }
     const r = await sendAudioFile(env, chatId, audio, replyTo, asVoice);
     if (!r.ok) throw new Error(r.description || "audio bhej nahi paya");
   } catch (e) {
