@@ -165,8 +165,8 @@ const EDGE_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_URL = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
 const VOICES = { swara: "hi-IN-SwaraNeural", madhur: "hi-IN-MadhurNeural" };
 
-async function edgeGec() {
-  let t = Math.floor(Date.now() / 1000) + 11644473600;
+async function edgeGec(skew = 0) {
+  let t = Math.floor(Date.now() / 1000 + skew) + 11644473600;
   t -= t % 300;
   const ticks = (BigInt(t) * 10000000n).toString();
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ticks + EDGE_TOKEN));
@@ -179,19 +179,31 @@ async function edgeTts(env, text, voice, fmt, rate = 0, pitch = 0, vol = 0) {
   const major = ver.split(".")[0];
   const cid = crypto.randomUUID().replace(/-/g, "");
   const muid = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
-  const url = `${EDGE_URL}?TrustedClientToken=${EDGE_TOKEN}&ConnectionId=${cid}&Sec-MS-GEC=${await edgeGec()}&Sec-MS-GEC-Version=1-${ver}`;
-  const res = await fetch(url, {
-    headers: {
-      Upgrade: "websocket",
-      Origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
-      "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 Edg/${major}.0.0.0`,
-      "Accept-Language": "en-US,en;q=0.9",
-      Pragma: "no-cache", "Cache-Control": "no-cache",
-      Cookie: "muid=" + muid + ";",
-    },
-  });
-  const ws = res.webSocket;
-  if (!ws) throw new Error("Edge TTS se connect nahi hua (" + res.status + ")");
+  const headers = {
+    Upgrade: "websocket",
+    Origin: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
+    "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 Edg/${major}.0.0.0`,
+    "Accept-Language": "en-US,en;q=0.9",
+    Pragma: "no-cache", "Cache-Control": "no-cache",
+    Cookie: "muid=" + muid + ";",
+  };
+  // 403 aaye to Microsoft ke response ka Date header padhke apni clock theek karo aur dobara try (3 baar tak)
+  let skew = 0, res, ws, why = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const url = `${EDGE_URL}?TrustedClientToken=${EDGE_TOKEN}&ConnectionId=${cid}&Sec-MS-GEC=${await edgeGec(skew)}&Sec-MS-GEC-Version=1-${ver}`;
+    res = await fetch(url, { headers });
+    ws = res.webSocket;
+    if (ws) break;
+    const srv = Date.parse(res.headers.get("date") || "");
+    const diff = Number.isFinite(srv) ? Math.round(srv / 1000 - Date.now() / 1000) : null;
+    why = res.status + (diff !== null ? ", clock farak " + diff + "s" : "");
+    if (res.status !== 403 || diff === null) break;
+    skew = diff;
+  }
+  if (!ws) {
+    let body = ""; try { body = (await res.text()).slice(0, 80); } catch {}
+    throw new Error("Edge TTS se connect nahi hua (" + why + ")" + (body ? " " + body : ""));
+  }
   ws.accept();
 
   return await new Promise((resolve, reject) => {
