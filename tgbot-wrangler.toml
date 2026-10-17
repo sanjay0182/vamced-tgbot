@@ -1,0 +1,14 @@
+# Is file ko GitHub me folder  tgbot/  ke andar  wrangler.toml  naam se rakho (tgbot.js ke saath).
+# Cloudflare me is worker ka "Root directory" = tgbot  set karo.
+name = "jaat-tg"
+main = "tgbot.js"
+compatibility_date = "2024-09-01"
+keep_vars = true
+
+# Variables/Secrets (TG_TOKEN, API_KEY, WEBHOOK_SECRET, API_BASE, ALLOWED_IDS) Cloudflare dashboard me daalo.
+# keep_vars = true se deploy par woh mitte nahi.
+
+# Optional: worker-to-worker fetch na chale (error 1042) to ye kholo
+# [[services]]
+# binding = "API"
+# service = "jaat-api"
