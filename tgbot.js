@@ -25,6 +25,8 @@ const MAX_MSG = 4000;         // ek message ke kitne chars API ko bhejne hain
 const MAX_PROMPT = 1500;      // user ke prompt ki max lambai
 const API_TIMEOUT_MS = 110000; // max intezaar 110s; tab tak "typing..." lagatar chalta hai, phir time-out message
 const TTS_MAX = 600;          // awaaz mein kitne akshar bolne hain (lamba jawab sirf shuru ka hissa bolega)
+const TTS_TOTAL = 5000;       // Render relay se: poore jawab ke kitne akshar bolne hain (isse lamba ho to aage ka hissa nahi bolega)
+const TTS_CHUNK = 800;        // relay ko ek baar mein itne akshar bhejte hain; lamba jawab tukdon mein banta hai aur jud jata hai
 
 const mem = new Map();        // KV na ho to fallback
 const seen = new Map();       // update_id dedupe (Telegram retry se double jawab na ho)
@@ -246,8 +248,9 @@ async function edgeTts(env, text, voice, fmt, rate = 0, pitch = 0, vol = 0) {
 }
 
 // bolne layak saaf text: code, link, markdown symbols, emoji hata do; TTS_MAX tak; XML-safe
-function ttsClean(s) {
+function ttsClean(s, max = TTS_MAX, esc = true) {
   let t = String(s || "")
+    .replace(/([^.!?।\s])[ \t]*\n+\s*/g, "$1. ") // nayi line / paragraph par thoda ruko
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]*)`/g, "$1")
     .replace(/https?:\/\/\S+/g, " ")
@@ -256,11 +259,12 @@ function ttsClean(s) {
     .replace(/[\u200d\ufe0f]/g, "")
     .replace(/[^\p{L}\p{N}\p{M}\s.,!?।'’]/gu, " ")
     .replace(/\s+/g, " ").trim();
-  if (t.length > TTS_MAX) {
-    t = t.slice(0, TTS_MAX);
+  if (t.length > max) {
+    t = t.slice(0, max);
     const i = Math.max(t.lastIndexOf("।"), t.lastIndexOf("."), t.lastIndexOf("!"), t.lastIndexOf("?"));
-    if (i > TTS_MAX * 0.5) t = t.slice(0, i + 1);
+    if (i > max * 0.5) t = t.slice(0, i + 1);
   }
+  if (!esc) return t;
   return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
@@ -285,8 +289,28 @@ async function proxyTts(env, text, voice, rate, pitch, vol) {
   return new Uint8Array(await r.arrayBuffer());
 }
 
+// lamba text ko vakya ke hisaab se tukdon mein todo (har tukda <= n akshar)
+function ttsChunks(t, n = TTS_CHUNK) {
+  const out = [];
+  t = String(t || "").trim();
+  while (t.length > n) {
+    let cut = Math.max(t.lastIndexOf("।", n), t.lastIndexOf(". ", n), t.lastIndexOf("! ", n), t.lastIndexOf("? ", n));
+    if (cut < n * 0.4) { cut = t.lastIndexOf(" ", n); if (cut < n * 0.4) cut = n; } else cut += 1;
+    const part = t.slice(0, cut).trim();
+    if (part) out.push(part);
+    t = t.slice(cut).trim();
+  }
+  if (t) out.push(t);
+  return out;
+}
+const joinBytes = (arrs) => {
+  const out = new Uint8Array(arrs.reduce((a, b) => a + b.length, 0)); let o = 0;
+  for (const a of arrs) { out.set(a, o); o += a.length; }
+  return out;
+};
+
 async function speak(env, chatId, answer, replyTo, st) {
-  const clean = ttsClean(answer);
+  const clean = env.TTS_URL ? ttsClean(answer, TTS_TOTAL, false) : ttsClean(answer);
   if (!clean) return;
   const voice = VOICES[st.vname] || env.EDGE_VOICE || VOICES.swara;
   const act = () => tg(env, "sendChatAction", { chat_id: chatId, action: "record_voice" });
@@ -295,7 +319,11 @@ async function speak(env, chatId, answer, replyTo, st) {
   try {
     let audio, asVoice = true;
     if (env.TTS_URL) {
-      audio = await proxyTts(env, clean, voice, st.rate || 0, st.pitch || 0, st.vol || 0);
+      // poora jawab: tukde karke 3-3 ek saath banwao, phir sahi kram mein jod do
+      const parts = ttsChunks(clean), bufs = [];
+      for (let i = 0; i < parts.length; i += 3)
+        bufs.push(...await Promise.all(parts.slice(i, i + 3).map((p) => proxyTts(env, p, voice, st.rate || 0, st.pitch || 0, st.vol || 0))));
+      audio = joinBytes(bufs);
       asVoice = false; // relay mp3 deta hai, sendAudio se jayega
     } else {
       try { audio = await edgeTts(env, clean, voice, "ogg-24khz-16bit-mono-opus", st.rate || 0, st.pitch || 0, st.vol || 0); }
